@@ -17,7 +17,11 @@
           <button class="btn green" :disabled="c.status !== 'OPEN'" @click="callNext(c.id)">下一位叫号</button>
           <button class="btn orange" :disabled="c.status === 'TEMP_LEAVE'" @click="setStatus(c.id, 'TEMP_LEAVE')">临时离岗</button>
           <button class="btn" :disabled="c.status === 'OPEN'" @click="setStatus(c.id, 'OPEN')">回岗开放</button>
-          <button class="btn red" @click="setStatus(c.id, 'FAULT')">设备故障</button>
+          <button class="btn red" :disabled="c.status === 'OFFLINE'" @click="reportOffline(c)">设备离线</button>
+        </div>
+        <div v-if="c.status === 'OFFLINE'" class="banner red" style="margin-top:8px">
+          设备已离线：在途客户已生成不可篡改处置单并转入待分配，维修单已派发给设备维修岗；
+          维修闭环后经主管复核恢复，客户不会自动回队。
         </div>
         <div v-if="c.note" class="small muted" style="margin-top:6px">备注：{{ c.note }}</div>
       </div>
@@ -41,7 +45,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { api } from '../api.js'
+import { api, newIdemKey } from '../api.js'
 import { store } from '../store.js'
 import { L, tag } from '../labels.js'
 import { toast } from '../toast.js'
@@ -82,6 +86,18 @@ async function setStatus(counterId, status) {
   try {
     await api.post('/counters/' + counterId + '/status', { status, note: notes[status] })
     toast('窗口状态已更新：' + tag(L.CounterStatus, status).text)
+    await store.refresh()
+  } catch (e) { toast(e.message, 'err') }
+}
+
+/** 设备离线上报：触发处置单+维修单四角色协同流程（幂等键防重复上报） */
+async function reportOffline(c) {
+  try {
+    const r = await api.postIdem('/devices/events', {
+      eventId: newIdemKey(), counterId: c.id, status: 'OFFLINE',
+      reason: '柜台上报：叫号终端/外设离线'
+    }, null)
+    toast(r.resultNote || '设备离线已上报')
     await store.refresh()
   } catch (e) { toast(e.message, 'err') }
 }

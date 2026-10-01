@@ -36,6 +36,17 @@ public class Counter {
     /** 平均办理秒数（用于负载展示） */
     private int avgServeSeconds;
 
+    /** 排队容量：可同时挂在本台位的在途（已分配+办理中）单据上限 */
+    private int capacity = 3;
+
+    /** 可办理业务类型（逗号分隔 BusinessType；空表示全部可办） */
+    @Column(length = 120)
+    private String supportedBusiness;
+
+    /** 乐观锁：并发迁移/容量锁定时防止互相覆盖 */
+    @Version
+    private Long version;
+
     @Column(length = 255)
     private String note;
 }

@@ -29,12 +29,16 @@ public final class Dtos {
             Integer estimatedMinutes,
             LocalDateTime appointmentTime,
             Long amount,
-            /** 适老安排 */
+            /** 适老安排 **/
             boolean escort,
             boolean priorityWindow,
             boolean preReview,
             boolean familyConfirm,
-            String familyContact
+            String familyContact,
+            /** 紧急业务（如紧急挂失/医疗缴费），风控告警不阻断 */
+            boolean urgent,
+            /** 已完成身份核验 */
+            boolean identityVerified
     ) {}
 
     /** 大堂经理分流 */
@@ -79,4 +83,23 @@ public final class Dtos {
     public record CashUpdateRequest(Long balance, Long threshold, Boolean replenishing, String note) {}
 
     public record AlertRequest(@NotBlank String title, String content, @NotBlank String alertType) {}
+
+    /* ---------------- 台位异常处置（设备离线/转台失败） ---------------- */
+
+    /** 设备状态上报（eventId 为设备侧幂等键） */
+    public record DeviceEventRequest(@NotBlank String eventId, @NotNull Long counterId,
+                                     @NotBlank String status, String reason) {}
+
+    /** 前台处置动作：MIGRATE / TO_MANUAL / DEFER */
+    public record DispositionActionRequest(@NotNull Enums.DispositionActionType actionType,
+                                           Long targetCounterId, String note) {}
+
+    /** 主管复核 */
+    public record ReviewRequest(@NotNull Boolean approve, Long counterId, String note) {}
+
+    /** 手动转台 */
+    public record TransferRequest(@NotNull Long targetCounterId, String reason) {}
+
+    /** 维修完成/确认备注 */
+    public record NoteRequest(String note) {}
 }

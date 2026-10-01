@@ -71,7 +71,7 @@ public class QueueTicket {
     private String materialNote;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 12)
+    @Column(nullable = false, length = 20)
     private Enums.TicketStatus status = Enums.TicketStatus.WAITING;
 
     /** 分流到的渠道 */
@@ -133,4 +133,38 @@ public class QueueTicket {
 
     /** 长等提醒是否已发送 */
     private boolean longWaitNotified;
+
+    /* ---------------- 排队权重 / 等待继承 / 叫号预估（台位异常处置特性） ---------------- */
+
+    /** 优先级（越大越优先，由客户类型/优先窗口/紧急标记综合得出） */
+    private int priority;
+
+    /** 当前排队权重（优先级 + 等待时长老化，迁移时随单据继承） */
+    private double queueWeight;
+
+    /** 历史等待段累计秒数（设备异常/暂缓时冻结，恢复/迁移后继承） */
+    private long accumulatedWaitSeconds;
+
+    /** 当前等待段起点（为空表示等待计时冻结中） */
+    private LocalDateTime waitStartedAt;
+
+    /** 预计叫号时间（按所在台位队列与均件时长重算） */
+    private LocalDateTime estimatedCallAt;
+
+    /** 紧急业务 */
+    private boolean urgent;
+
+    /** 已完成身份核验（紧急业务风控告警不阻断的前提） */
+    private boolean identityVerified;
+
+    /** 转台次数（频繁转台风控信号） */
+    private int transferCount;
+
+    /** 待分配原因（迁移冲突回滚等可解释状态） */
+    @Column(length = 255)
+    private String pendingReason;
+
+    /** 乐观锁：并发转台/重复提交时防止互相覆盖 */
+    @Version
+    private Long version;
 }

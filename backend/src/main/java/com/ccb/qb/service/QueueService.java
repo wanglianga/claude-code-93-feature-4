@@ -22,6 +22,8 @@ public class QueueService {
     private final CashInventoryRepository cash;
     private final BranchAlertRepository alerts;
     private final UserRepository users;
+    private final QueueOps ops;
+    private final RiskService riskService;
 
     @Value("${app.queue.long-wait-seconds}")
     private long longWaitSeconds;
@@ -40,13 +42,16 @@ public class QueueService {
 
     public QueueService(QueueTicketRepository tickets, CounterRepository counters,
                         QueueEventRepository events, CashInventoryRepository cash,
-                        BranchAlertRepository alerts, UserRepository users) {
+                        BranchAlertRepository alerts, UserRepository users,
+                        QueueOps ops, RiskService riskService) {
         this.tickets = tickets;
         this.counters = counters;
         this.events = events;
         this.cash = cash;
         this.alerts = alerts;
         this.users = users;
+        this.ops = ops;
+        this.riskService = riskService;
     }
 
     /* ---------------- 取号 / 预约 ---------------- */
@@ -79,7 +84,19 @@ public class QueueService {
         t.setFamilyContact(req.familyContact());
         t.setFraudStatus(Enums.FraudStatus.NONE);
         t.setTicketNo(nextTicketNo(req.businessType()));
+        // 排队权重 / 等待计时 / 紧急标记
+        t.setUrgent(req.urgent());
+        t.setIdentityVerified(req.identityVerified());
+        t.setWaitStartedAt(t.getCreatedAt());
+        t.setAccumulatedWaitSeconds(0);
+        t.setPriority(ops.defaultPriority(t));
+        t.setQueueWeight(ops.computeWeight(t));
         tickets.save(t);
+        ops.transition(t, Enums.QueueChangeType.ENQUEUE, null, null,
+                null, Enums.TicketStatus.WAITING.name(), null, null,
+                "取号/预约进入待分流队列", actor == null ? "客户" : actor.getDisplayName());
+        // 风控：重复取号检测（告警不阻断取号）
+        riskService.checkRepeatTicket(t);
 
         // 轮椅需求：自动生成无障碍引导安排事件，通知安保
         if (req.wheelchair()) {
@@ -172,6 +189,7 @@ public class QueueService {
         t.setFamilyConfirm(req.familyConfirm() || t.isFamilyConfirm());
         t.setStatus(Enums.TicketStatus.ASSIGNED);
         t.setAssignedAt(LocalDateTime.now());
+        t.setPendingReason(null);
         tickets.save(t);
 
         // 窗口绑定
@@ -180,6 +198,12 @@ public class QueueService {
             c.setStatus(Enums.CounterStatus.OPEN);
             if (req.assigneeId() != null) c.setTellerId(req.assigneeId());
             counters.save(c);
+            // 生成叫号预估：重算该台位队列权重与预计叫号时间
+            ops.recomputeCounterQueue(req.counterId());
+            ops.transition(t, Enums.QueueChangeType.ASSIGN, null, req.counterId(),
+                    Enums.TicketStatus.WAITING.name(), Enums.TicketStatus.ASSIGNED.name(),
+                    null, null, "大堂经理分流至台位，生成叫号预估",
+                    actor == null ? "系统" : actor.getDisplayName());
         }
 
         String chName = switch (req.channel()) {
@@ -212,10 +236,14 @@ public class QueueService {
 
     @Transactional
     public QueueTicket callNext(Long counterId, User teller) {
-        Counter c = mustCounter(counterId);
+        Counter c = counters.findByIdForUpdate(counterId)
+                .orElseThrow(() -> new BizException("窗口不存在: " + counterId));
         if (!Objects.equals(c.getTellerId(), teller.getId())) {
             // 允许本人窗口或大堂经理代叫
             c.setTellerId(teller.getId());
+        }
+        if (c.getStatus() == Enums.CounterStatus.OFFLINE) {
+            throw new BizException("该台位设备离线，维修闭环并经主管复核恢复前不可叫号");
         }
         if (c.getStatus() == Enums.CounterStatus.TEMP_LEAVE || c.getStatus() == Enums.CounterStatus.CLOSED) {
             throw new BizException("窗口处于「临时离岗/关闭」状态，不可叫号");
@@ -223,9 +251,12 @@ public class QueueService {
         if (c.getStatus() == Enums.CounterStatus.FAULT) {
             throw new BizException("该设备故障中，请联系安保/运维后再开放窗口");
         }
-        // 优先：已分配给本窗口的；否则按优先级取一个 ASSIGNED
+        // 优先：已分配给本窗口的（按排队权重降序，权重相同按分配先后）；否则按优先级取一个 ASSIGNED
         QueueTicket t = tickets.findByCounterIdAndStatusIn(counterId,
-                        List.of(Enums.TicketStatus.ASSIGNED)).stream().findFirst()
+                        List.of(Enums.TicketStatus.ASSIGNED)).stream()
+                .sorted(Comparator.comparingDouble(QueueTicket::getQueueWeight).reversed()
+                        .thenComparing(x -> x.getAssignedAt() == null ? x.getCreatedAt() : x.getAssignedAt()))
+                .findFirst()
                 .orElseGet(() -> tickets.findByStatusOrderByCreatedAtAsc(Enums.TicketStatus.ASSIGNED)
                         .stream()
                         .filter(x -> x.getCounterId() == null)
@@ -248,6 +279,10 @@ public class QueueService {
                     .filter(x -> Objects.equals(x.getTellerId(), teller.getId())).findFirst()
                     .orElseThrow(() -> new BizException("未找到您名下的开放窗口，请联系大堂经理分配"));
         }
+        // 风控：人工插队检测——同窗口存在权重更高的在排号码时，指定叫号产生可追溯告警（不阻断）
+        if (t.getStatus() == Enums.TicketStatus.ASSIGNED) {
+            riskService.checkManualJump(t, ops.counterQueue(c.getId()), teller);
+        }
         return startService(t, c, teller);
     }
 
@@ -255,16 +290,23 @@ public class QueueService {
         if (c.getStatus() != Enums.CounterStatus.OPEN) {
             throw new BizException("窗口当前不可用：" + c.getStatus());
         }
+        String fromStatus = t.getStatus().name();
+        double wBefore = t.getQueueWeight();
+        LocalDateTime etaBefore = t.getEstimatedCallAt();
         c.setCurrentTicketId(t.getId());
         counters.save(c);
         t.setStatus(Enums.TicketStatus.SERVING);
         t.setCounterId(c.getId());
         t.setAssigneeId(teller.getId());
         t.setServingAt(LocalDateTime.now());
-        if (t.getServingAt() != null && t.getCreatedAt() != null) {
-            t.setWaitSeconds(java.time.Duration.between(t.getCreatedAt(), t.getServingAt()).getSeconds());
-        }
+        // 实际等待 = 历史冻结段 + 当前等待段（迁移/暂缓继承后的真实排队时长）
+        ops.freezeWait(t);
+        t.setWaitSeconds(t.getAccumulatedWaitSeconds());
         tickets.save(t);
+        ops.transition(t, Enums.QueueChangeType.CALL, c.getId(), c.getId(),
+                fromStatus, Enums.TicketStatus.SERVING.name(), wBefore, etaBefore,
+                "叫号开始办理", teller.getDisplayName());
+        ops.recomputeCounterQueue(c.getId());
         addEvent(t.getId(), Enums.IssueType.NONE,
                 teller.getDisplayName() + " 在 " + c.getName() + " 叫号 " + t.getTicketNo()
                         + (t.isPriorityWindow() ? "（爱心优先窗口）" : ""), teller, c.getId());
@@ -316,6 +358,10 @@ public class QueueService {
         t.setStatus(Enums.TicketStatus.DONE);
         t.setFinishedAt(LocalDateTime.now());
         tickets.save(t);
+        ops.transition(t, Enums.QueueChangeType.DONE, t.getCounterId(), null,
+                Enums.TicketStatus.SERVING.name(), Enums.TicketStatus.DONE.name(),
+                t.getQueueWeight(), t.getEstimatedCallAt(), "办结：" + resultText(req.resultType()),
+                actor == null ? "系统" : actor.getDisplayName());
 
         if (t.getCounterId() != null) {
             Counter c = mustCounter(t.getCounterId());
@@ -324,6 +370,7 @@ public class QueueService {
                 c.setServedCount(c.getServedCount() + 1);
                 counters.save(c);
             }
+            ops.recomputeCounterQueue(t.getCounterId());
         }
         // 大额现金成功：扣减库存
         if (t.getBusinessType() == Enums.BusinessType.LARGE_CASH
@@ -354,6 +401,9 @@ public class QueueService {
         t.setFinishedAt(LocalDateTime.now());
         t.setResultNote(reason);
         tickets.save(t);
+        ops.transition(t, Enums.QueueChangeType.CANCEL, t.getCounterId(), null,
+                null, Enums.TicketStatus.CANCELLED.name(), t.getQueueWeight(), t.getEstimatedCallAt(),
+                "取消：" + reason, actor == null ? "系统" : actor.getDisplayName());
         addEvent(id, Enums.IssueType.NONE, "号码取消：" + reason, actor, t.getCounterId());
         return t;
     }
@@ -615,7 +665,7 @@ public class QueueService {
         return tickets.save(t);
     }
 
-    /* ---------------- 定时：长等预警 ---------------- */
+    /* ---------------- 定时：长等预警 + 权重老化/预计叫号时间重算 ---------------- */
 
     @Scheduled(fixedDelay = 30_000)
     @Transactional
@@ -640,6 +690,15 @@ public class QueueService {
                         "已分流但等待叫号超过 " + (longWaitSeconds / 60) + " 分钟，请大堂经理核查窗口负载",
                         null, null);
             }
+        }
+    }
+
+    /** 定时老化：每 30 秒重算各台位队列权重与预计叫号时间（等待越久权重越高） */
+    @Scheduled(fixedDelay = 30_000)
+    @Transactional
+    public void refreshQueueEstimates() {
+        for (Counter c : counters.findAll()) {
+            ops.recomputeCounterQueue(c.getId());
         }
     }
 

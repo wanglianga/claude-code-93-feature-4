@@ -23,10 +23,13 @@ public class QueueController {
 
     private final QueueService svc;
     private final UserRepository users;
+    private final com.ccb.qb.service.IdempotencyService idem;
 
-    public QueueController(QueueService svc, UserRepository users) {
+    public QueueController(QueueService svc, UserRepository users,
+                           com.ccb.qb.service.IdempotencyService idem) {
         this.svc = svc;
         this.users = users;
+        this.idem = idem;
     }
 
     private User actor(Authentication auth) {
@@ -38,8 +41,12 @@ public class QueueController {
     /* ---------- 取号 / 预约 / 档案 ---------- */
 
     @PostMapping("/tickets")
-    public QueueTicket create(@Valid @RequestBody Dtos.TicketRequest req, Authentication auth) {
-        return svc.createTicket(req, actor(auth));
+    public org.springframework.http.ResponseEntity<?> create(
+            @Valid @RequestBody Dtos.TicketRequest req,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idemKey,
+            Authentication auth) {
+        User u = actor(auth);
+        return idem.execute(idemKey, "POST /api/tickets", () -> svc.createTicket(req, u));
     }
 
     @GetMapping("/tickets")

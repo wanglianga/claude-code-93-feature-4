@@ -42,11 +42,14 @@ const loading = ref(false)
 
 const accounts = [
   { u: 'customer01', name: '客户·陈晨', desc: '手机取号/适老预约/进度查询' },
-  { u: 'manager', name: '大堂经理·林芳', desc: '材料预审、分流调度、异常协调、停电应急' },
+  { u: 'manager', name: '大堂经理·林芳', desc: '分流调度、异常协调、恢复复核（主管）' },
+  { u: 'frontdesk01', name: '前台·王芸', desc: '异常处置单：迁移/转人工/暂缓、统一查询' },
   { u: 'teller01', name: '柜员·周敏', desc: '1号综合柜台叫号办理' },
   { u: 'teller02', name: '柜员·吴涛', desc: '2号现金柜台（大额现金/挂失）' },
   { u: 'teller03', name: '柜员·郑洁', desc: '爱心优先窗口（老人/手语）' },
   { u: 'advisor01', name: '理财经理·孙睿', desc: '理财室咨询、风险双录' },
+  { u: 'repair01', name: '设备维修·赵工', desc: '设备状态上报、维修闭环、恢复建议' },
+  { u: 'risk01', name: '风控·刘洋', desc: '重复取号/频繁转台/插队告警确认' },
   { u: 'security01', name: '安保·马强', desc: '反诈核验、无障碍通道、维序' },
   { u: 'service01', name: '客服·何丽', desc: '投诉受理、回访、远程客服' }
 ]

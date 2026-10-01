@@ -45,13 +45,28 @@ public class DataSeeder implements CommandLineRunner {
         User advisor = user("advisor01", "理财经理·孙睿", Enums.Role.ADVISOR, "理财咨询/风险评估/双录", 5L, pwd);
         User security = user("security01", "安保·马强", Enums.Role.SECURITY, "反诈核验/无障碍通道/维序", null, pwd);
         User service = user("service01", "客服·何丽", Enums.Role.SERVICE, "投诉受理/回访/远程客服", null, pwd);
-        users.saveAll(List.of(customer, manager, t1, t2, t3, advisor, security, service));
+        // 台位异常处置四角色：前台 / 设备维修 / 风控（柜台沿用柜员账号）
+        User frontdesk = user("frontdesk01", "前台·王芸", Enums.Role.FRONT_DESK, "取号引导/异常处置/客户通知", null, pwd);
+        User repair = user("repair01", "设备维修·赵工", Enums.Role.REPAIR, "自助设备/叫号终端运维", null, pwd);
+        User risk = user("risk01", "风控·刘洋", Enums.Role.RISK, "重复取号/频繁转台/插队告警", null, pwd);
+        users.saveAll(List.of(customer, manager, t1, t2, t3, advisor, security, service,
+                frontdesk, repair, risk));
 
         Counter c1 = counter("1号综合柜台", Enums.CounterType.GENERAL, t1.getId(), 420);
+        c1.setCapacity(3);
+        c1.setSupportedBusiness("ACCOUNT_OPEN,TRANSFER,SOCIAL_CARD,LOST_REPORT");
         Counter c2 = counter("2号现金柜台", Enums.CounterType.CASH, t2.getId(), 520);
+        c2.setCapacity(3);
+        c2.setSupportedBusiness("TRANSFER,LARGE_CASH,LOST_REPORT,ACCOUNT_OPEN");
         Counter c3 = counter("爱心优先窗口", Enums.CounterType.PRIORITY, t3.getId(), 360);
+        c3.setCapacity(2);
+        c3.setSupportedBusiness("ACCOUNT_OPEN,TRANSFER,SOCIAL_CARD,LOST_REPORT,LARGE_CASH");
         Counter c4 = counter("智能柜员机01", Enums.CounterType.SELF_SERVICE, null, 180);
+        c4.setCapacity(2);
+        c4.setSupportedBusiness("ACCOUNT_OPEN,TRANSFER,SOCIAL_CARD");
         Counter c5 = counter("理财室A", Enums.CounterType.GENERAL, advisor.getId(), 900);
+        c5.setCapacity(2);
+        c5.setSupportedBusiness("WEALTH_CONSULT");
         counters.saveAll(List.of(c1, c2, c3, c4, c5));
 
         CashInventory inv = new CashInventory();
@@ -134,6 +149,60 @@ public class DataSeeder implements CommandLineRunner {
         q4.setCreatedAt(now.minusMinutes(10));
         q4.setAssignedAt(now.minusMinutes(8));
         tickets.save(q4);
+
+        // 台位异常处置演示：两张已分配智能柜员机01（已生成叫号预估）的在途单
+        QueueTicket q5 = new QueueTicket();
+        q5.setTicketNo("A002");
+        q5.setCustomerName("陈晓（普通客户）");
+        q5.setCustomerType(Enums.CustomerType.NORMAL);
+        q5.setSource(Enums.Source.WALK_IN);
+        q5.setBusinessType(Enums.BusinessType.ACCOUNT_OPEN);
+        q5.setRiskLevel(Enums.RiskLevel.LOW);
+        q5.setEstimatedMinutes(20);
+        q5.setStatus(Enums.TicketStatus.ASSIGNED);
+        q5.setChannel(Enums.Channel.SELF_MACHINE);
+        q5.setCounterId(4L);
+        q5.setCreatedAt(now.minusMinutes(6));
+        q5.setAssignedAt(now.minusMinutes(5));
+        tickets.save(q5);
+
+        QueueTicket q6 = new QueueTicket();
+        q6.setTicketNo("Z002");
+        q6.setCustomerName("孙强（转账2万）");
+        q6.setCustomerType(Enums.CustomerType.NORMAL);
+        q6.setSource(Enums.Source.MOBILE_APP);
+        q6.setBusinessType(Enums.BusinessType.TRANSFER);
+        q6.setRiskLevel(Enums.RiskLevel.MEDIUM);
+        q6.setAmount(20_000L);
+        q6.setEstimatedMinutes(10);
+        q6.setStatus(Enums.TicketStatus.ASSIGNED);
+        q6.setChannel(Enums.Channel.SELF_MACHINE);
+        q6.setCounterId(4L);
+        q6.setCreatedAt(now.minusMinutes(3));
+        q6.setAssignedAt(now.minusMinutes(2));
+        tickets.save(q6);
+
+        // 初始化排队权重/等待计时/叫号预估字段
+        for (QueueTicket t : tickets.findAll()) {
+            t.setWaitStartedAt(t.getAssignedAt() != null ? t.getAssignedAt() : t.getCreatedAt());
+            t.setAccumulatedWaitSeconds(0);
+            int p = 1;
+            if (t.getCustomerType() == Enums.CustomerType.VIP
+                    || t.getCustomerType() == Enums.CustomerType.CORPORATE) p += 1;
+            if (t.isElderly() || t.isPriorityWindow()) p += 1;
+            t.setPriority(p);
+            long waitMin = Math.max(0, java.time.Duration.between(t.getWaitStartedAt(), now).getSeconds()) / 60;
+            t.setQueueWeight(Math.round((p * 100.0 + waitMin * 2.0) * 100) / 100.0);
+            tickets.save(t);
+        }
+        for (Counter c : counters.findAll()) {
+            var q = tickets.findByCounterIdAndStatusIn(c.getId(), List.of(Enums.TicketStatus.ASSIGNED));
+            int avg = Math.max(60, c.getAvgServeSeconds());
+            for (int i = 0; i < q.size(); i++) {
+                q.get(i).setEstimatedCallAt(now.plusSeconds((long) (i + 1) * avg));
+                tickets.save(q.get(i));
+            }
+        }
     }
 
     private User user(String username, String name, Enums.Role role, String skill, Long counterId, String pwd) {

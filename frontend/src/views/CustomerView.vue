@@ -53,12 +53,17 @@
           <label><input type="checkbox" v-model="f.preReview" />到店前材料预审</label>
           <label><input type="checkbox" v-model="f.familyConfirm" />家属远程确认</label>
         </div>
+        <div class="check-row" style="margin-top:8px">
+          <label><input type="checkbox" v-model="f.urgent" />紧急业务（如紧急挂失/医疗缴费）</label>
+          <label><input type="checkbox" v-model="f.identityVerified" />已完成身份核验</label>
+        </div>
+        <div class="small muted" style="margin-top:4px">紧急且已完成身份核验的业务，风控告警不阻断办理。</div>
         <label class="field full" style="margin-top:8px" v-if="f.familyConfirm">
           <b>家属联系方式（用于远程确认）</b>
           <input v-model="f.familyContact" placeholder="如：女儿 王女士 138****1234" />
         </label>
         <div class="btn-row">
-          <button class="btn" @click="submit">提交取号 / 预约</button>
+          <button class="btn" :disabled="submitting" @click="submit">{{ submitting ? '提交中…' : '提交取号 / 预约' }}</button>
           <button class="btn gray" @click="reset">重置</button>
         </div>
       </div>
@@ -82,7 +87,7 @@
 
 <script setup>
 import { computed, reactive, ref } from 'vue'
-import { api } from '../api.js'
+import { api, newIdemKey } from '../api.js'
 import { store } from '../store.js'
 import { L } from '../labels.js'
 import { toast } from '../toast.js'
@@ -92,13 +97,15 @@ import TicketDetailModal from '../components/TicketDetailModal.vue'
 
 const props = defineProps({ user: Object })
 const openId = ref(null)
+const submitting = ref(false)
+let idemKey = newIdemKey()
 
 const f = reactive({
   customerName: '', customerType: 'NORMAL', source: 'MOBILE_APP',
   businessType: 'ACCOUNT_OPEN', riskLevel: 'LOW', estimatedMinutes: 15, amount: null,
   elderly: false, wheelchair: false, hearingAssist: false,
   escort: false, priorityWindow: false, preReview: false,
-  familyConfirm: false, familyContact: ''
+  familyConfirm: false, familyContact: '', urgent: false, identityVerified: false
 })
 
 function onElderlyType() {
@@ -112,14 +119,17 @@ const myTickets = computed(() =>
     t.customerName.includes('陈晨')))
 
 async function submit() {
+  if (submitting.value) return
+  submitting.value = true
   try {
     const payload = { ...f, customerId: props.user.id }
     if (!payload.amount) payload.amount = null
-    const r = await api.post('/tickets', payload)
+    // 幂等提交：双击/重试共用同一幂等键，服务端只创建一张号
+    const r = await api.postIdem('/tickets', payload, idemKey)
     toast('取号成功：' + r.ticketNo)
     reset()
     await store.refresh()
-  } catch (e) { toast(e.message, 'err') }
+  } catch (e) { toast(e.message, 'err') } finally { submitting.value = false }
 }
 
 function reset() {
@@ -127,8 +137,10 @@ function reset() {
     customerName: '', customerType: 'NORMAL', source: 'MOBILE_APP', businessType: 'ACCOUNT_OPEN',
     riskLevel: 'LOW', estimatedMinutes: 15, amount: null,
     elderly: false, wheelchair: false, hearingAssist: false,
-    escort: false, priorityWindow: false, preReview: false, familyConfirm: false, familyContact: ''
+    escort: false, priorityWindow: false, preReview: false, familyConfirm: false, familyContact: '',
+    urgent: false, identityVerified: false
   })
+  idemKey = newIdemKey()
 }
 
 async function cancel(id) {

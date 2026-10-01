@@ -14,12 +14,13 @@ export function clearAuth() {
   localStorage.removeItem(USER_KEY)
 }
 
-async function request(method, path, body) {
+async function request(method, path, body, extraHeaders) {
   const res = await fetch('/api' + path, {
     method,
     headers: {
       'Content-Type': 'application/json',
-      ...(getToken() ? { Authorization: 'Bearer ' + getToken() } : {})
+      ...(getToken() ? { Authorization: 'Bearer ' + getToken() } : {}),
+      ...(extraHeaders || {})
     },
     body: body !== undefined ? JSON.stringify(body) : undefined
   })
@@ -35,8 +36,15 @@ async function request(method, path, body) {
   return data
 }
 
+/** 生成幂等键：同一逻辑操作的重试/双击共用同一键，服务端保证只执行一次 */
+export function newIdemKey() {
+  return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2))
+}
+
 export const api = {
   get: (p) => request('GET', p),
   post: (p, b) => request('POST', p, b ?? {}),
+  /** 带幂等键的 POST（重复提交/双击/重试安全） */
+  postIdem: (p, b, key) => request('POST', p, b ?? {}, key ? { 'Idempotency-Key': key } : {}),
   put: (p, b) => request('PUT', p, b ?? {})
 }

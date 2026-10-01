@@ -54,6 +54,9 @@ function counterName(id) {
 function waitOf(t) {
   if (t.waitSeconds != null) return t.waitSeconds
   if (['DONE', 'CANCELLED'].includes(t.status)) return null
-  return Math.max(0, Math.floor((Date.now() - new Date((t.servingAt || t.assignedAt || t.createdAt).replace(' ', 'T')).getTime()) / 1000))
+  // 与后端口径一致：历史冻结段 + 当前等待段
+  const acc = t.accumulatedWaitSeconds || 0
+  if (!t.waitStartedAt) return acc
+  return acc + Math.max(0, Math.floor((Date.now() - new Date(t.waitStartedAt.replace(' ', 'T')).getTime()) / 1000))
 }
 </script>

@@ -31,6 +31,8 @@ public class SecurityConfig {
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(reg -> reg
                 .requestMatchers("/api/auth/**", "/actuator/health/**").permitAll()
+                // 静态门户资源（可选单进程托管模式；生产由 nginx 托管前端）
+                .requestMatchers("/", "/index.html", "/assets/**", "/favicon.ico", "/vite.svg").permitAll()
                 .anyRequest().authenticated())
             .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();
