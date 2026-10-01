@@ -36,6 +36,13 @@ public class Counter {
     /** 平均办理秒数（用于负载展示） */
     private int avgServeSeconds;
 
+    /** 台位容量：可同时容纳的排队中+办理中客户数（迁移时原子锁定） */
+    private int capacity;
+
+    /** 乐观锁：并发迁移锁定容量时防并发覆盖 */
+    @Version
+    private long version;
+
     @Column(length = 255)
     private String note;
 }

@@ -13,13 +13,17 @@
 | 角色 | 账号 | 主要权限/视图 |
 |---|---|---|
 | 客户 | `customer01` | 线上取号、适老服务预约（陪同引导/优先窗口/材料预审/家属远程确认/轮椅/听力引导）、查看排队进度与处理时间线、取消排队 |
-| 大堂经理 | `manager` | 网点 KPI 看板、材料完整度登记、**渠道智能推荐与分流**（柜台/自助机/理财室/远程客服）、窗口负载与柜员技能调度、现金库存查看与调拨、未闭环事件协调、养老金日/突发停电应急 |
-| 柜员 | `teller01` / `teller02` / `teller03` | 本窗口叫下一位、指定号码叫号、爱心窗口优先、临时离岗/回岗/设备故障、办结（业务结果+风险提示+投诉记录） |
+| 大堂经理 | `manager` | 网点 KPI 看板、材料完整度登记、**渠道智能推荐与分流**（柜台/自助机/理财室/远程客服）、窗口负载与柜员技能调度、现金库存查看与调拨、未闭环事件协调、养老金日/突发停电应急、**前台处置（保留权重迁移/转人工窗口/客户暂缓）**、人工插队调整 |
+| 柜员 | `teller01` / `teller02` / `teller03` | 本窗口叫下一位、指定号码叫号、爱心窗口优先、临时离岗/回岗、**设备离线/故障上报**、办结（业务结果+风险提示+投诉记录） |
 | 理财经理 | `advisor01` | 理财室排队、理财咨询叫号、双录完成办结 |
 | 安保 | `security01` | **大额转账反诈核验**（通过放行 / 拦截劝阻）、无障碍通道迎接任务、自助设备故障与停电上报 |
 | 客服 | `service01` | 投诉插队受理、长等客户关怀、办结客户回访（写入运营档案）、远程渠道引导 |
+| 设备维修 | `repair01` | 维修工单接单/维修中/完成闭环，维修完成触发公平恢复建议 |
+| 风控 | `risk01` | 重复取号/跨窗口频繁转台/人工插队告警确认与放行 |
+| 主管 | `supervisor` | 公平恢复建议复核（批准恢复入队 / 驳回转待分配） |
 
 > 统一演示密码：**`ccb@123456`**（登录页点击账号可自动填充）
+> 全体员工角色均可用「统一查询」页按业务单号追溯处置单、处置记录、维修闭环、客户通知、队列变更时间线、主管复核与风控告警。
 
 ### 核心业务规则
 
@@ -37,6 +41,42 @@
 - **现金业务**：大额取现校验现金库存，不足自动发起调拨；办结成功扣减库存，低于预警线看板告警。
 - **养老金集中发放日**：可一键标记/解除，全网点横幅提示（老年客户激增、增开爱心窗口、加强备付与维序）。
 - **运营档案**：办结后记录实际等待时长、业务结果（成功/拒绝/升级/转渠道）、风险提示、投诉与回访；提供渠道引导分布图、结果统计、平均等待、反诈拦截数、回访覆盖率。
+
+### 特性4：设备离线 / 转台失败处置（四方协同）
+
+当台位在客户已取号、已生成叫号预估后发生**设备离线**或**转台失败**时，系统自动把客户、队列、业务类型、优先级、原台位、已等待时长、失败原因写入**不可篡改的处置单**（SHA-256 哈希链，篡改可被一键检出），并以同一业务单号驱动**前台（大堂经理）、柜台（柜员）、设备维修、风控**四方协同，主管负责复核。
+
+- **不可篡改处置单**：故障瞬间冻结票据权重快照（`权重 = 优先级分×10000 + 有效等待秒数`），处置单内容字段创建后不再修改，前后单哈希串联；`GET /api/dispositions-verify-chain` 随时校验完整性。
+- **前台三方案**（`POST /api/dispositions/{id}/migrate|to-manual|defer`，均带幂等键）：
+  1. **保留原排队权重后迁移**：同一事务内原子完成「释放原台位占用 → 锁定目标台位容量（悲观锁）→ 继承已等待时长 → 按权重在目标队列的实际排位重算预计叫号时间」；
+  2. **转人工窗口**：目标限定人工台位（非自助设备）；
+  3. **客户暂缓**：冻结等待时长（不丢失也不虚增），客户返回后可直接恢复迁移。
+  - 若目标台位在操作期间被其他请求占用（容量满），**不重复排队、不丢失原队列位置**，回滚到可解释的**待分配（PENDING_ASSIGN）**状态，时间线与客户通知均记录原因，可换台位重试。
+- **维修闭环与公平恢复**：维修工单完成（或设备上报恢复）后，**不自动把客户插回队首**；系统按「故障时权重快照 + 当前窗口负载 + 同类业务服务能力」计算建议台位与建议排位，生成恢复建议，**主管复核**通过后才按排位恢复入队；驳回则转入待分配由前台重新处置。
+- **风控告警**：同一客户 60 分钟内重复取号（≥3 次）、累计跨窗口转台（≥2 次）、人工插队调整，均生成带追溯引用（关联事件/单据 id）的告警；**已完成身份核验的紧急业务告警不阻断**（正常入队，仅留痕），未核验客户重复取号则挂起待风控确认放行。
+- **统一查询**：`GET /api/trace/{业务单号}` 一次返回处置单、前台处置记录、维修闭环、客户通知、队列变更时间线、主管复核结果、风控告警与哈希链校验结果。
+- **幂等与并发**：
+  - 取号、处置动作、设备状态上报均支持幂等键（唯一约束），重复提交/网络重试返回首次结果；
+  - 设备状态反复上报（抖动）仅在实际状态变化时生效，同一票据不会重复生成处置单；
+  - 迁移按「处置单悲观锁 → 台位悲观锁」顺序串行，容量判断在锁内完成，并发转台不会产生双重入队；
+  - 叫号对台位加悲观锁，并发叫号不会叫到同一张票（防双重叫号）；票据/台位均带乐观锁版本号兜底。
+
+**特性4主要接口**
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/devices/{counterId}/status` | 设备状态上报（`reportKey` 幂等防抖动），离线/故障自动生成处置单+维修单，恢复开放自动闭环 |
+| GET | `/api/dispositions` | 处置单列表（可按状态过滤） |
+| POST | `/api/dispositions/{id}/migrate` | 方案一：保留原排队权重迁移（原子：释放/锁容量/继承等待/重算ETA） |
+| POST | `/api/dispositions/{id}/to-manual` | 方案二：转人工窗口 |
+| POST | `/api/dispositions/{id}/defer` | 方案三：客户暂缓 |
+| POST | `/api/tickets/{id}/transfer` | 直接转台尝试（失败则生成 TRANSFER_FAILED 处置单） |
+| GET | `/api/dispositions-verify-chain` | 处置单哈希链完整性校验 |
+| GET/POST | `/api/maintenance`、`/api/maintenance/{id}/start|finish` | 维修工单闭环；完成时生成公平恢复建议 |
+| GET/POST | `/api/recovery-suggestions`、`/api/recovery-suggestions/{id}/review` | 恢复建议列表与主管复核 |
+| GET/POST | `/api/risk-alerts`、`/api/risk-alerts/{id}/ack` | 风控告警列表与确认放行 |
+| POST | `/api/tickets/{id}/jump` | 人工插队调整（产生可追溯告警） |
+| GET | `/api/trace/{bizOrderNo}` | 统一追溯查询（同一业务单号全要素） |
 
 ## 二、演示数据
 
@@ -97,6 +137,16 @@ docker compose down -v         # 同时清空数据库卷，下次启动重新�
 7. 对等待较久的单，**客服** `service01` 受理「投诉插队」；办结后在「投诉/回访」页填写回访。
 8. 打开「运营档案」页：查看等待时长、结果、风险提示、投诉、回访、渠道引导分布与反诈拦截统计。
 
+### 特性4演示走查（设备离线/转台失败处置）
+
+1. **客户** `customer01` 取号（或经理代录），**经理** `manager` 分流到「1号综合柜台」→ 单据生成**预计叫号时间**。
+2. **柜员** `teller01` 在窗口卡片点「设备离线」→ 系统冻结权重快照、生成**不可篡改处置单**与维修工单，客户收到通知。
+3. **经理** 打开「前台处置」→ 对处置单选择「保留权重迁移」：先选已占满的爱心窗口 → 提示**回滚到待分配**（权益保留）；再选 2 号现金柜台 → 迁移成功，等待时长继承、预计叫号重算。
+4. 再制造一张单分流到 2 号台，**柜员** `teller02` 报「设备故障」→ **维修** `repair01` 接单 → 「维修完成」→ 系统生成**公平恢复建议**（按权重快照排位，非队首）。
+5. **主管** `supervisor` 在「主管复核」批准 → 客户按建议排位恢复入队（或驳回 → 转待分配）。
+6. **风控** `risk01` 查看告警：用同一客户连续取 3 个号触发「重复取号」（未核验客户被挂起，风控确认后放行）；紧急+已核验客户重复取号**只告警不阻断**；经理在单据详情弹窗点「人工插队」也会留痕告警。
+7. 任意员工角色打开「统一查询」，输入业务单号（如 `A005`）→ 一站查看处置单哈希、处置记录、维修闭环、客户通知、队列变更时间线、主管复核与风控告警；「前台处置」页顶部可随时做**哈希链校验**。
+
 ## 五、目录结构
 
 ```
@@ -108,20 +158,27 @@ docker compose down -v         # 同时清空数据库卷，下次启动重新�
 │   ├── settings.xml            # 构建期 Maven 加速镜像
 │   ├── pom.xml
 │   └── src/main/java/com/ccb/qb/
-│       ├── model/Enums.java          # 全部业务枚举
+│       ├── model/Enums.java          # 全部业务枚举（含特性4新增状态/角色）
 │       ├── entity/                   # User/QueueTicket/Counter/QueueEvent/CashInventory/BranchAlert
-│       ├── repo/                     # JPA Repository
+│       │                             #   + DispositionOrder(哈希链处置单)/DispositionAction/MaintenanceOrder
+│       │                             #   + RecoverySuggestion/SupervisorReview/RiskAlert/Notification
+│       │                             #   + DeviceStatusReport(幂等上报)/ChainState(链状态)
+│       ├── repo/                     # JPA Repository（含台位/处置单悲观锁查询）
 │       ├── security/                 # JWT + Spring Security
 │       ├── service/QueueService.java # 取号/分流/叫号/反诈/事件/停电/档案 核心业务
-│       ├── config/DataSeeder.java    # 演示数据种子
-│       └── web/                      # AuthController / QueueController / 异常处理
+│       ├── service/DispositionService.java # 特性4：设备上报/处置单/原子迁移/维修闭环/恢复建议/复核/追溯
+│       ├── service/RiskService.java  # 特性4：重复取号/频繁转台/人工插队风控
+│       ├── service/QueueMath.java    # 权重/预计叫号时间统一计算
+│       ├── config/DataSeeder.java    # 演示数据种子（含新角色账号/台位容量/链状态）
+│       └── web/                      # AuthController / QueueController / DispositionController / 异常处理
+│   └── src/test/java/com/ccb/qb/     # 特性4测试：流程/并发幂等/恢复与风控（18 个用例）
 └── frontend/
     ├── Dockerfile              # 多阶段：node 构建 → nginx 托管（非 root + HEALTHCHECK）
     ├── nginx.conf              # SPA 回退 + /api、/actuator 反代 app:8080
     └── src/
         ├── App.vue / api.js / store.js / labels.js
         ├── components/         # 队列表、单据六方协同弹窗（含处理时间线）、网点横幅
-        └── views/              # 客户/经理/柜员/理财/安保/客服/运营档案 七个视图
+        └── views/              # 客户/经理/前台处置/柜员/理财/安保/客服/设备维修/风控/主管复核/统一查询/运营档案
 ```
 
 ## 六、配置项（环境变量）
@@ -133,4 +190,55 @@ docker compose down -v         # 同时清空数据库卷，下次启动重新�
 | `SPRING_DATASOURCE_URL` | `jdbc:postgresql://db:5432/branch_queue` | compose 内数据库地址 |
 | `SPRING_DATASOURCE_USERNAME/PASSWORD` | `ccb / ccb_pass` | 数据库账号 |
 
-应用侧业务参数（`backend/src/main/resources/application.yml`，可按需调整）：长等阈值 `app.queue.long-wait-seconds=600`、大额阈值 `app.queue.large-amount-threshold=50000`。
+应用侧业务参数（`backend/src/main/resources/application.yml`，可按需调整）：长等阈值 `app.queue.long-wait-seconds=600`、大额阈值 `app.queue.large-amount-threshold=50000`、重复取号风控窗口/阈值 `app.risk.repeat-window-minutes=60` / `app.risk.repeat-threshold=3`、频繁转台阈值 `app.risk.transfer-threshold=2`。
+
+## 七、本地开发（不装 Docker / PostgreSQL 也能跑）
+
+后端内置 `local` profile，使用内嵌 H2 数据库（数据落在 `backend/data/`），无需安装 PostgreSQL：
+
+```bash
+cd backend
+mvn -s settings.xml spring-boot:run -Dspring-boot.run.profiles=local
+# 或先打包再运行：mvn -s settings.xml package -DskipTests
+#   java -jar target/branch-queue.jar --spring.profiles.active=local
+# 后端：http://localhost:8080 （健康检查 /actuator/health）
+```
+
+前端开发服务器（代理 /api 到本地 8080）：
+
+```bash
+cd frontend
+npm install
+npm run dev        # http://localhost:5173
+```
+
+> Docker 部署仍使用 PostgreSQL 16（compose 编排），`local` profile 仅用于本地开发与验证。
+
+## 八、验证方式与已执行验证结论
+
+### 自动化测试（已执行，全部通过）
+
+```bash
+cd backend && mvn -s settings.xml test
+# 结果：Tests run: 18, Failures: 0, Errors: 0, Skipped: 0 —— BUILD SUCCESS
+```
+
+覆盖特性4关键保证（H2 内存库，SpringBootTest 多线程）：
+
+- **DispositionFlowTest（8 例）**：处置单七要素齐全+哈希链生成；设备状态反复上报/重复 reportKey 幂等防抖；迁移继承等待+重算预计叫号；容量满回滚到待分配且权益不丢、换台位重试成功；客户暂缓冻结等待并可恢复；转台失败生成处置单；篡改处置单内容后哈希链校验失败并定位单号；统一追溯聚合各角色记录。
+- **ConcurrencyTest（5 例）**：容量 1 台位被两个并发迁移请求争抢 → 恰好一个成功一个回滚待分配，不双重入队不丢队列；同一幂等键并发重复提交 4 次 → 收敛为同一处置动作；取号幂等键重复提交返回同一单据；两个柜员并发叫号 → 两张票各被叫一次（防双重叫号）；并发离线上报 → 处置单/维修单各一张。
+- **RecoveryAndRiskTest（5 例）**：恢复建议按权重快照排第 2 位（VIP 权重更高在前，**未自动插回队首**），主管批准按排位恢复、重复复核幂等；主管驳回转待分配；未核验客户重复取号被阻断（挂起）、风控确认放行；**已核验紧急业务告警不阻断**；人工插队与频繁转台告警留痕。
+
+### 端到端接口冒烟（已执行，44/44 通过）
+
+以后端 `local` profile 真实启动，用 curl 全流程走查：五角色登录 → 幂等取号 → 分流生成叫号预估 → 设备离线（重复提交/抖动）→ 处置单七要素+哈希链 → 容量满回滚待分配 → 换台位迁移成功（继承等待+重算ETA+幂等键重放）→ 维修闭环生成恢复建议 → 主管复核恢复入队 → 重复取号阻断/紧急核验不阻断/风控放行 → 统一追溯 10 个要素齐全。脚本输出 `PASS=44 FAIL=0`。
+
+### 前端构建（已执行）
+
+```bash
+cd frontend && npm install && npm run build   # vite build 成功（37 个模块）
+```
+
+### Docker 一键部署
+
+本环境无 Docker 守护进程，未实际执行 `docker compose up`；compose 配置沿用既有三服务编排（db/app/web，含健康检查与依赖顺序），后端镜像构建命令与本地 `mvn package` 一致（已验证可打包），前端镜像构建命令与本地 `npm run build` 一致（已验证可构建）。部署验证请按「三、快速启动」执行。

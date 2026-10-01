@@ -34,7 +34,13 @@ public final class Dtos {
             boolean priorityWindow,
             boolean preReview,
             boolean familyConfirm,
-            String familyContact
+            String familyContact,
+            /** 特性4：取号幂等键（重复提交返回同一单据） */
+            String idempotencyKey,
+            /** 特性4：紧急业务 */
+            boolean urgent,
+            /** 特性4：身份已完成现场核验 */
+            boolean identityVerified
     ) {}
 
     /** 大堂经理分流 */
@@ -79,4 +85,28 @@ public final class Dtos {
     public record CashUpdateRequest(Long balance, Long threshold, Boolean replenishing, String note) {}
 
     public record AlertRequest(@NotBlank String title, String content, @NotBlank String alertType) {}
+
+    /* ================= 特性4：设备离线/转台失败处置 ================= */
+
+    /** 设备状态上报（幂等键 reportKey 防重复提交与状态抖动） */
+    public record DeviceStatusReportRequest(
+            @NotNull Enums.CounterStatus status,
+            @NotBlank String reportKey,
+            String note
+    ) {}
+
+    /** 前台处置：迁移（保留原排队权重）/ 转人工窗口 */
+    public record MigrateRequest(@NotNull Long targetCounterId, @NotBlank String idempotencyKey) {}
+
+    /** 前台处置：客户暂缓 */
+    public record DeferRequest(String note, @NotBlank String idempotencyKey) {}
+
+    /** 直接转台尝试（转台失败触发处置单） */
+    public record TransferRequest(@NotNull Long targetCounterId, @NotBlank String idempotencyKey) {}
+
+    /** 主管复核恢复建议 */
+    public record ReviewRequest(@NotNull Enums.ReviewDecision decision, String comment) {}
+
+    /** 人工插队调整（产生风控告警） */
+    public record JumpRequest(String reason) {}
 }

@@ -9,18 +9,28 @@ export const store = reactive({
   events: [],
   staff: [],
   dash: null,
+  dispositions: [],
+  maintenance: [],
+  suggestions: [],
+  riskAlerts: [],
 
   async refresh(silent = true) {
     try {
-      const [t, c, e, s, d] = await Promise.all([
+      const [t, c, e, s, d, dp, mo, sg, ra] = await Promise.all([
         api.get('/tickets'), api.get('/counters'),
-        api.get('/events'), api.get('/staff'), api.get('/dashboard')
+        api.get('/events'), api.get('/staff'), api.get('/dashboard'),
+        api.get('/dispositions'), api.get('/maintenance'),
+        api.get('/recovery-suggestions'), api.get('/risk-alerts')
       ])
       this.tickets = t
       this.counters = c
       this.events = e
       this.staff = s
       this.dash = d
+      this.dispositions = dp
+      this.maintenance = mo
+      this.suggestions = sg
+      this.riskAlerts = ra
       this.ready = true
     } catch (err) {
       if (!silent) throw err

@@ -22,6 +22,8 @@ public class QueueService {
     private final CashInventoryRepository cash;
     private final BranchAlertRepository alerts;
     private final UserRepository users;
+    private final QueueMath queueMath;
+    private final RiskService riskService;
 
     @Value("${app.queue.long-wait-seconds}")
     private long longWaitSeconds;
@@ -40,19 +42,27 @@ public class QueueService {
 
     public QueueService(QueueTicketRepository tickets, CounterRepository counters,
                         QueueEventRepository events, CashInventoryRepository cash,
-                        BranchAlertRepository alerts, UserRepository users) {
+                        BranchAlertRepository alerts, UserRepository users,
+                        QueueMath queueMath, RiskService riskService) {
         this.tickets = tickets;
         this.counters = counters;
         this.events = events;
         this.cash = cash;
         this.alerts = alerts;
         this.users = users;
+        this.queueMath = queueMath;
+        this.riskService = riskService;
     }
 
     /* ---------------- 取号 / 预约 ---------------- */
 
     @Transactional
     public QueueTicket createTicket(Dtos.TicketRequest req, User actor) {
+        // 幂等：同一幂等键重复提交（网络重试/双击）返回同一单据，不产生重复取号
+        if (req.idempotencyKey() != null && !req.idempotencyKey().isBlank()) {
+            var dup = tickets.findByIdempotencyKey(req.idempotencyKey());
+            if (dup.isPresent()) return dup.get();
+        }
         QueueTicket t = new QueueTicket();
         t.setCustomerId(req.customerId());
         t.setCustomerName(req.customerName() == null || req.customerName().isBlank()
@@ -79,6 +89,12 @@ public class QueueService {
         t.setFamilyContact(req.familyContact());
         t.setFraudStatus(Enums.FraudStatus.NONE);
         t.setTicketNo(nextTicketNo(req.businessType()));
+        // 特性4：幂等键 / 紧急与身份核验标记 / 排队权重初始化
+        t.setIdempotencyKey(req.idempotencyKey());
+        t.setUrgent(req.urgent());
+        t.setIdentityVerified(req.identityVerified());
+        t.setWaitStartedAt(LocalDateTime.now());
+        t.setPriorityScore(queueMath.priorityScore(t));
         tickets.save(t);
 
         // 轮椅需求：自动生成无障碍引导安排事件，通知安保
@@ -97,6 +113,8 @@ public class QueueService {
                     "适老预约：需家属远程确认（联系方式："
                             + (req.familyContact() == null ? "未登记" : req.familyContact()) + "）", actor, null);
         }
+        // 特性4：重复取号风控（已核验紧急业务不阻断）
+        riskService.checkRepeatTicket(t, actor);
         return t;
     }
 
@@ -172,14 +190,26 @@ public class QueueService {
         t.setFamilyConfirm(req.familyConfirm() || t.isFamilyConfirm());
         t.setStatus(Enums.TicketStatus.ASSIGNED);
         t.setAssignedAt(LocalDateTime.now());
+        if (t.getWaitStartedAt() == null) {
+            t.setWaitStartedAt(LocalDateTime.now());
+        }
         tickets.save(t);
 
-        // 窗口绑定
+        // 窗口绑定 + 生成叫号预估（预计叫号时间）
         if (req.counterId() != null) {
             Counter c = mustCounter(req.counterId());
+            if (c.getStatus() == Enums.CounterStatus.FAULT || c.getStatus() == Enums.CounterStatus.OFFLINE) {
+                throw new BizException("目标台位设备离线/故障中，请先完成维修闭环再分流");
+            }
             c.setStatus(Enums.CounterStatus.OPEN);
             if (req.assigneeId() != null) c.setTellerId(req.assigneeId());
             counters.save(c);
+            var waiting = tickets.findByCounterIdAndStatusIn(c.getId(),
+                            List.of(Enums.TicketStatus.ASSIGNED)).stream()
+                    .filter(x -> !x.getId().equals(t.getId())).toList();
+            t.setEstimatedCallAt(queueMath.estimateCallAt(
+                    c, waiting, queueMath.weight(t, LocalDateTime.now()), LocalDateTime.now()));
+            tickets.save(t);
         }
 
         String chName = switch (req.channel()) {
@@ -212,7 +242,9 @@ public class QueueService {
 
     @Transactional
     public QueueTicket callNext(Long counterId, User teller) {
-        Counter c = mustCounter(counterId);
+        // 悲观锁串行化同台位并发叫号：两个柜员同时叫号不会叫到同一张票（防双重叫号）
+        Counter c = counters.findForUpdate(counterId)
+                .orElseThrow(() -> new BizException("窗口不存在: " + counterId));
         if (!Objects.equals(c.getTellerId(), teller.getId())) {
             // 允许本人窗口或大堂经理代叫
             c.setTellerId(teller.getId());
@@ -220,8 +252,8 @@ public class QueueService {
         if (c.getStatus() == Enums.CounterStatus.TEMP_LEAVE || c.getStatus() == Enums.CounterStatus.CLOSED) {
             throw new BizException("窗口处于「临时离岗/关闭」状态，不可叫号");
         }
-        if (c.getStatus() == Enums.CounterStatus.FAULT) {
-            throw new BizException("该设备故障中，请联系安保/运维后再开放窗口");
+        if (c.getStatus() == Enums.CounterStatus.FAULT || c.getStatus() == Enums.CounterStatus.OFFLINE) {
+            throw new BizException("该设备故障/离线中，请联系维修闭环后再开放窗口");
         }
         // 优先：已分配给本窗口的；否则按优先级取一个 ASSIGNED
         QueueTicket t = tickets.findByCounterIdAndStatusIn(counterId,
@@ -491,7 +523,15 @@ public class QueueService {
 
     @Transactional
     public Counter updateCounterStatus(Long counterId, Dtos.CounterStatusRequest req, User actor) {
+        if (req.status() == Enums.CounterStatus.FAULT || req.status() == Enums.CounterStatus.OFFLINE) {
+            // 设备故障/离线必须走设备上报流程（生成处置单与维修单），由 DispositionController 承接
+            throw new BizException("设备故障/离线请通过设备状态上报接口处理（POST /api/devices/{id}/status）");
+        }
         Counter c = mustCounter(counterId);
+        if ((c.getStatus() == Enums.CounterStatus.FAULT || c.getStatus() == Enums.CounterStatus.OFFLINE)
+                && req.status() == Enums.CounterStatus.OPEN) {
+            throw new BizException("设备需经维修闭环后恢复开放（维修工单完成或设备上报恢复）");
+        }
         Enums.CounterStatus old = c.getStatus();
         c.setStatus(req.status());
         c.setNote(req.note());
@@ -506,16 +546,6 @@ public class QueueService {
                 tickets.save(t);
                 addEvent(t.getId(), Enums.IssueType.TELLER_LEAVE,
                         "柜员临时离岗，单据挂起待重新分流：" + Optional.ofNullable(req.note()).orElse(""),
-                        actor, c.getId());
-                c.setCurrentTicketId(null);
-            }
-        } else if (req.status() == Enums.CounterStatus.FAULT) {
-            if (c.getCurrentTicketId() != null) {
-                QueueTicket t = mustTicket(c.getCurrentTicketId());
-                t.setStatus(Enums.TicketStatus.PENDING);
-                tickets.save(t);
-                addEvent(t.getId(), Enums.IssueType.MACHINE_FAULT,
-                        "自助设备/窗口故障，单据挂起并改引柜台：" + Optional.ofNullable(req.note()).orElse(""),
                         actor, c.getId());
                 c.setCurrentTicketId(null);
             }

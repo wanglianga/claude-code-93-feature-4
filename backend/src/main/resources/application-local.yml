@@ -1,0 +1,12 @@
+# 本地开发 profile：无需安装 PostgreSQL，使用内嵌 H2（数据落在 ./data/localdb）
+# 启动：mvn spring-boot:run -Dspring-boot.run.profiles=local
+# 或：java -jar target/branch-queue.jar --spring.profiles.active=local
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/localdb;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update

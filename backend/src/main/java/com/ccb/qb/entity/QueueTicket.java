@@ -133,4 +133,38 @@ public class QueueTicket {
 
     /** 长等提醒是否已发送 */
     private boolean longWaitNotified;
+
+    /* ================= 特性4：设备离线/转台失败处置 ================= */
+
+    /** 取号幂等键（客户端生成，重复提交返回同一单据，防重复取号） */
+    @Column(unique = true, length = 64)
+    private String idempotencyKey;
+
+    /** 优先级分（客户类型/紧急/优先窗口/人工调整综合），权重计算基础 */
+    private int priorityScore;
+
+    /** 紧急业务（如急救绿色通道、司法冻结等） */
+    private boolean urgent;
+
+    /** 身份是否已完成现场核验（已核验的紧急业务风控告警不阻断） */
+    private boolean identityVerified;
+
+    /** 继承的已等待秒数（迁移/恢复时累加，保证排队权重不丢失） */
+    private long inheritedWaitSeconds;
+
+    /** 当前等待片段的起始时间（有效等待 = inheritedWaitSeconds + now - waitStartedAt） */
+    private LocalDateTime waitStartedAt;
+
+    /** 故障发生时的权重快照（priorityScore*10000 + 有效等待秒数），维修后公平恢复的依据 */
+    private Long weightSnapshot;
+
+    /** 预计叫号时间（分流/迁移/恢复时重算） */
+    private LocalDateTime estimatedCallAt;
+
+    /** 累计转台次数（跨窗口频繁转台风控信号） */
+    private int transferCount;
+
+    /** 乐观锁：并发迁移/叫号时防止状态互相覆盖 */
+    @Version
+    private long version;
 }

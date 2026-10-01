@@ -32,6 +32,14 @@
         <dt>引导渠道</dt><dd>{{ t.channel ? L.Channel[t.channel] : '待分流' }}
           <span v-if="counterName" class="muted"> / {{ counterName }}</span></dd>
         <dt>取号时间</dt><dd>{{ fmtTime(t.createdAt) }}</dd>
+        <dt>预计叫号</dt><dd>{{ fmtTime(t.estimatedCallAt) }}
+          <span v-if="t.urgent" class="tag red">紧急</span>
+          <span v-if="t.identityVerified" class="tag green">身份已核验</span></dd>
+        <dt>排队权重</dt><dd class="small">
+          优先级分 {{ t.priorityScore }} · 继承等待 {{ waitText(t.inheritedWaitSeconds) }}
+          <span v-if="t.weightSnapshot" class="muted"> · 故障权重快照 {{ t.weightSnapshot }}</span>
+          <span v-if="t.transferCount" class="muted"> · 已转台 {{ t.transferCount }} 次</span>
+        </dd>
         <dt>开始办理</dt><dd>{{ fmtTime(t.servingAt) }}（等待 {{ waitText(t.waitSeconds) }}）</dd>
         <dt>办结时间</dt><dd>{{ fmtTime(t.finishedAt) }}</dd>
         <dt>办理结果</dt><dd>{{ t.resultType ? L.ResultType[t.resultType] : '—' }} {{ t.resultNote || '' }}</dd>
@@ -96,6 +104,7 @@
           <div class="btn-row">
             <button class="btn" @click="doAssign">确认分流</button>
             <button class="btn orange" @click="quickEvent('MISSING_ID','老人忘带/材料缺失，启动预审与家属确认')">上报：忘带证件</button>
+            <button class="btn red" @click="doJump">人工插队（产生风控告警）</button>
           </div>
         </template>
 
@@ -125,7 +134,7 @@
             <div class="btn-row">
               <button class="btn green" @click="doComplete">办结归档</button>
               <button class="btn orange" @click="quickEvent('TELLER_LEAVE','柜员临时离岗，单据挂起重新分流')">临时离岗</button>
-              <button class="btn red" @click="quickEvent('MACHINE_FAULT','自助设备故障，改引导人工柜台')">设备故障上报</button>
+              <button class="btn red" @click="reportDeviceFault">设备故障上报</button>
             </div>
           </template>
         </template>
@@ -143,7 +152,7 @@
           <div class="btn-row">
             <button v-if="t.fraudStatus === 'PENDING'" class="btn green" @click="doFraud('PASSED')">核验通过·恢复办理</button>
             <button v-if="t.fraudStatus === 'PENDING'" class="btn red" @click="doFraud('BLOCKED')">拦截·劝阻客户</button>
-            <button class="btn gray" @click="quickEvent('MACHINE_FAULT','安保巡查发现自助设备异常，暂停使用')">上报设备故障</button>
+            <button class="btn gray" @click="reportDeviceFault">上报设备故障</button>
           </div>
           <div v-if="t.wheelchair" class="banner blue">♿ 该客户有轮椅需求：请提前开启无障碍通道并到门口迎接</div>
         </template>
@@ -273,6 +282,29 @@ async function doAssign() {
   try {
     await api.post('/tickets/' + props.ticketId + '/assign', assign)
     toast('分流完成')
+    await refreshAll()
+  } catch (e) { toast(e.message, 'err') }
+}
+
+// 人工插队：提升排队权重并产生可追溯风控告警（不阻断已核验紧急业务）
+async function doJump() {
+  const reason = window.prompt('请填写人工插队原因（将生成风控告警并留痕）：', '客户特殊情况，现场主管同意优先')
+  if (reason === null) return
+  try {
+    await api.post('/tickets/' + props.ticketId + '/jump', { reason })
+    toast('已调整排队位置，风控告警已生成')
+    await refreshAll()
+  } catch (e) { toast(e.message, 'err') }
+}
+
+// 设备故障/离线：走设备上报流程，自动生成处置单与维修单
+async function reportDeviceFault() {
+  if (!t.value.counterId) { toast('该单据未绑定台位，请在台位卡片上上报设备状态', 'err'); return }
+  try {
+    await api.post('/devices/' + t.value.counterId + '/status', {
+      status: 'FAULT', reportKey: crypto.randomUUID(), note: '现场上报设备故障'
+    })
+    toast('设备故障已上报：在队客户已冻结权重并生成处置单')
     await refreshAll()
   } catch (e) { toast(e.message, 'err') }
 }

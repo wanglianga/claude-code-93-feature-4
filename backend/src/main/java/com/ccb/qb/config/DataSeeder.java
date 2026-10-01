@@ -13,6 +13,8 @@ import java.util.List;
 
 /** 演示数据：六类角色账号、窗口/自助机、现金库存、养老金日、若干排队记录 */
 @Component
+@org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(
+        name = "app.seed.enabled", havingValue = "true", matchIfMissing = true)
 public class DataSeeder implements CommandLineRunner {
 
     private final UserRepository users;
@@ -20,22 +22,62 @@ public class DataSeeder implements CommandLineRunner {
     private final CashInventoryRepository cash;
     private final BranchAlertRepository alerts;
     private final QueueTicketRepository tickets;
+    private final ChainStateRepository chain;
     private final PasswordEncoder encoder;
 
     public DataSeeder(UserRepository users, CounterRepository counters, CashInventoryRepository cash,
-                      BranchAlertRepository alerts, QueueTicketRepository tickets, PasswordEncoder encoder) {
+                      BranchAlertRepository alerts, QueueTicketRepository tickets,
+                      ChainStateRepository chain, PasswordEncoder encoder) {
         this.users = users;
         this.counters = counters;
         this.cash = cash;
         this.alerts = alerts;
         this.tickets = tickets;
+        this.chain = chain;
         this.encoder = encoder;
     }
 
     @Override
     public void run(String... args) {
-        if (users.count() > 0) return;
+        if (users.count() == 0) {
+            seedBase();
+        }
+        ensureFeature4();
+    }
 
+    /** 特性4：设备维修/风控/主管账号、台位容量、处置单哈希链状态 —— 幂等补齐 */
+    private void ensureFeature4() {
+        String pwd = encoder.encode("ccb@123456");
+        ensureUser("repair01", "维修工程师·赵工", Enums.Role.MAINTENANCE, "自助设备/窗口终端运维", null, pwd);
+        ensureUser("risk01", "风控专员·钱坤", Enums.Role.RISK, "排队风控/异常行为监测", null, pwd);
+        ensureUser("supervisor", "网点主管·孙立", Enums.Role.SUPERVISOR, "处置复核/恢复建议审批", null, pwd);
+
+        for (Counter c : counters.findAll()) {
+            if (c.getCapacity() <= 0) {
+                c.setCapacity(switch (c.getType()) {
+                    case GENERAL -> 8;
+                    case CASH -> 6;
+                    case PRIORITY -> 5;
+                    case SELF_SERVICE -> 4;
+                });
+                counters.save(c);
+            }
+        }
+        if (chain.findById(1L).isEmpty()) {
+            ChainState cs = new ChainState();
+            cs.setId(1L);
+            cs.setLastHash("GENESIS");
+            chain.save(cs);
+        }
+    }
+
+    private void ensureUser(String username, String name, Enums.Role role, String skill, Long counterId, String pwd) {
+        if (users.findByUsername(username).isEmpty()) {
+            users.save(user(username, name, role, skill, counterId, pwd));
+        }
+    }
+
+    private void seedBase() {
         String pwd = encoder.encode("ccb@123456");
         User customer = user("customer01", "客户·陈晨", Enums.Role.CUSTOMER, "手机银行注册客户", null, pwd);
         User manager = user("manager", "大堂经理·林芳", Enums.Role.MANAGER, "分流调度/材料预审/投诉处理", null, pwd);
@@ -85,6 +127,8 @@ public class DataSeeder implements CommandLineRunner {
         q1.setEscort(true);
         q1.setStatus(Enums.TicketStatus.WAITING);
         q1.setCreatedAt(now.minusMinutes(4));
+        q1.setWaitStartedAt(now.minusMinutes(4));
+        q1.setPriorityScore(450);
         tickets.save(q1);
 
         QueueTicket q2 = new QueueTicket();
@@ -103,6 +147,8 @@ public class DataSeeder implements CommandLineRunner {
         q2.setPreReview(true);
         q2.setStatus(Enums.TicketStatus.WAITING);
         q2.setCreatedAt(now.minusMinutes(2));
+        q2.setWaitStartedAt(now.minusMinutes(2));
+        q2.setPriorityScore(450);
         tickets.save(q2);
 
         QueueTicket q3 = new QueueTicket();
@@ -116,6 +162,8 @@ public class DataSeeder implements CommandLineRunner {
         q3.setEstimatedMinutes(20);
         q3.setStatus(Enums.TicketStatus.WAITING);
         q3.setCreatedAt(now.minusMinutes(1));
+        q3.setWaitStartedAt(now.minusMinutes(1));
+        q3.setPriorityScore(300);
         tickets.save(q3);
 
         QueueTicket q4 = new QueueTicket();
@@ -133,6 +181,8 @@ public class DataSeeder implements CommandLineRunner {
         q4.setAssigneeId(advisor.getId());
         q4.setCreatedAt(now.minusMinutes(10));
         q4.setAssignedAt(now.minusMinutes(8));
+        q4.setWaitStartedAt(now.minusMinutes(8));
+        q4.setPriorityScore(100);
         tickets.save(q4);
     }
 

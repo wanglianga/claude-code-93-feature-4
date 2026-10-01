@@ -15,9 +15,15 @@
         </div>
         <div class="btn-row">
           <button class="btn green" :disabled="c.status !== 'OPEN'" @click="callNext(c.id)">下一位叫号</button>
-          <button class="btn orange" :disabled="c.status === 'TEMP_LEAVE'" @click="setStatus(c.id, 'TEMP_LEAVE')">临时离岗</button>
-          <button class="btn" :disabled="c.status === 'OPEN'" @click="setStatus(c.id, 'OPEN')">回岗开放</button>
-          <button class="btn red" @click="setStatus(c.id, 'FAULT')">设备故障</button>
+          <button class="btn orange" :disabled="c.status === 'TEMP_LEAVE' || c.status === 'FAULT' || c.status === 'OFFLINE'"
+                  @click="setStatus(c.id, 'TEMP_LEAVE')">临时离岗</button>
+          <button class="btn" :disabled="c.status === 'OPEN' || c.status === 'FAULT' || c.status === 'OFFLINE'"
+                  @click="setStatus(c.id, 'OPEN')">回岗开放</button>
+          <button class="btn red" :disabled="c.status === 'OFFLINE'" @click="reportDevice(c.id, 'OFFLINE')">设备离线</button>
+          <button class="btn red" :disabled="c.status === 'FAULT'" @click="reportDevice(c.id, 'FAULT')">设备故障</button>
+        </div>
+        <div v-if="c.status === 'FAULT' || c.status === 'OFFLINE'" class="small muted" style="margin-top:6px">
+          ⚠ 设备已离线/故障：在队客户已冻结权重并生成处置单，等待维修工单闭环后恢复开放
         </div>
         <div v-if="c.note" class="small muted" style="margin-top:6px">备注：{{ c.note }}</div>
       </div>
@@ -78,10 +84,24 @@ async function callNext(counterId) {
 }
 
 async function setStatus(counterId, status) {
-  const notes = { TEMP_LEAVE: '柜员临时离岗，预计10分钟', FAULT: '设备故障等待维修', OPEN: '柜员回岗' }
+  const notes = { TEMP_LEAVE: '柜员临时离岗，预计10分钟', OPEN: '柜员回岗' }
   try {
     await api.post('/counters/' + counterId + '/status', { status, note: notes[status] })
     toast('窗口状态已更新：' + tag(L.CounterStatus, status).text)
+    await store.refresh()
+  } catch (e) { toast(e.message, 'err') }
+}
+
+// 设备离线/故障：走设备状态上报流程（幂等键防重复提交与状态抖动），自动生成处置单与维修单
+async function reportDevice(counterId, status) {
+  try {
+    const r = await api.post('/devices/' + counterId + '/status', {
+      status,
+      reportKey: crypto.randomUUID(),
+      note: status === 'OFFLINE' ? '柜台上报设备离线' : '柜台上报设备故障'
+    })
+    const resultText = { APPLIED: '已生效', DUPLICATE: '重复上报已忽略', NOOP: '状态未变化' }
+    toast(`设备状态上报${resultText[r.result] || ''}：在队客户已冻结排队权重并生成处置单`)
     await store.refresh()
   } catch (e) { toast(e.message, 'err') }
 }

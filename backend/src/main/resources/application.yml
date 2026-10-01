@@ -41,3 +41,9 @@ app:
     long-wait-seconds: 600
     # 大额现金/转账阈值（元），触发反诈核验与现金库存校验
     large-amount-threshold: 50000
+  risk:
+    # 重复取号风控：同一客户在该时间窗（分钟）内取号达到阈值即告警
+    repeat-window-minutes: 60
+    repeat-threshold: 3
+    # 跨窗口频繁转台告警阈值（累计转台次数）
+    transfer-threshold: 2

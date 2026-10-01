@@ -53,6 +53,11 @@
           <label><input type="checkbox" v-model="f.preReview" />到店前材料预审</label>
           <label><input type="checkbox" v-model="f.familyConfirm" />家属远程确认</label>
         </div>
+        <div class="check-row" style="margin-top:8px">
+          <label><input type="checkbox" v-model="f.urgent" />紧急业务</label>
+          <label><input type="checkbox" v-model="f.identityVerified" />身份已现场核验</label>
+          <span class="small muted" v-if="f.urgent && f.identityVerified">已核验紧急业务：风控告警不阻断</span>
+        </div>
         <label class="field full" style="margin-top:8px" v-if="f.familyConfirm">
           <b>家属联系方式（用于远程确认）</b>
           <input v-model="f.familyContact" placeholder="如：女儿 王女士 138****1234" />
@@ -98,8 +103,12 @@ const f = reactive({
   businessType: 'ACCOUNT_OPEN', riskLevel: 'LOW', estimatedMinutes: 15, amount: null,
   elderly: false, wheelchair: false, hearingAssist: false,
   escort: false, priorityWindow: false, preReview: false,
-  familyConfirm: false, familyContact: ''
+  familyConfirm: false, familyContact: '',
+  urgent: false, identityVerified: false
 })
+
+// 取号幂等键：表单生成一次，重复点击/网络重试提交同一键，不会重复取号；成功后重新生成
+let idemKey = crypto.randomUUID()
 
 function onElderlyType() {
   f.elderly = f.customerType === 'ELDERLY'
@@ -113,10 +122,11 @@ const myTickets = computed(() =>
 
 async function submit() {
   try {
-    const payload = { ...f, customerId: props.user.id }
+    const payload = { ...f, customerId: props.user.id, idempotencyKey: idemKey }
     if (!payload.amount) payload.amount = null
     const r = await api.post('/tickets', payload)
     toast('取号成功：' + r.ticketNo)
+    idemKey = crypto.randomUUID()
     reset()
     await store.refresh()
   } catch (e) { toast(e.message, 'err') }
@@ -127,7 +137,8 @@ function reset() {
     customerName: '', customerType: 'NORMAL', source: 'MOBILE_APP', businessType: 'ACCOUNT_OPEN',
     riskLevel: 'LOW', estimatedMinutes: 15, amount: null,
     elderly: false, wheelchair: false, hearingAssist: false,
-    escort: false, priorityWindow: false, preReview: false, familyConfirm: false, familyContact: ''
+    escort: false, priorityWindow: false, preReview: false, familyConfirm: false, familyContact: '',
+    urgent: false, identityVerified: false
   })
 }
 
